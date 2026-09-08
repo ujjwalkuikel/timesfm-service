@@ -13,11 +13,31 @@ separate repo/plan.
 
 ## Status
 
-As of this task, `model.py` ships the `ForecastEngine` interface plus a stub
-that reports itself unloaded and raises `NotLoaded` — there is no real
-model wired up yet (that's Task 3, transcribed from `docs/feasibility.md`).
-The HTTP contract (auth, validation, response shape) implemented in
-`service.py` is real and fully tested against that stub via monkeypatching.
+`model.py`'s `ForecastEngine` is a real implementation: it lazily loads the
+TimesFM 3 checkpoint (`google/timesfm-3.0-pytorch`, transcribed from
+`docs/feasibility.md`'s reference snippet) in `ensure_loaded()`, and
+`forecast()` runs single-flight inference (an `asyncio.Lock`, with
+`queue_depth` reporting waiters) and maps `predict_batch`'s output to the
+mean + p10..p90 contract shape. `timesfm3`/`torch`/`numpy` are imported
+lazily inside the methods that need them, never at module import time, so
+the HTTP contract tests (`tests/test_contract.py`) run — with `ENGINE`
+monkeypatched to a fake — in an environment with none of those packages
+installed. A separate, slow test suite
+(`tests/test_model_real.py`, `pytest.importorskip`-guarded and marked
+`@pytest.mark.slow`) exercises the real checkpoint; see "Test" below.
+
+**Covariates (v1 policy):** `docs/feasibility.md` records that
+`predict_batch` accepts covariate kwargs
+(`past_only_covariates`/`past_future_covariates`), but this service does
+not wire them into the model in v1 — they exist in the upstream API but
+were found not worth plumbing through yet. Multi-series requests with any
+`covariates` block are rejected at request validation (422, `detail`
+shape). Single-series requests with a `covariates` block that actually
+carries data pass request validation (array lengths are still checked)
+but are rejected by the engine itself with a 422
+`{"error": "covariates unsupported in v1"}` — see
+`model.CovariatesUnsupported` / `service.py`'s handler for it. This is a
+deliberate "discovered but not wired" gap, not faked support.
 
 ## API
 
@@ -58,9 +78,21 @@ python -m pytest tests/ -q
 
 `tests/test_contract.py` covers the full HTTP contract — auth, every
 validation rule, and the response shape — with `ENGINE` monkeypatched to a
-fake. It passes with no `timesfm`/`torch` installed. A later, separately
-marked slow test suite (Task 3) exercises the real model and is skipped
-when that package isn't present.
+fake. It passes with no `timesfm`/`torch` installed.
+
+`tests/test_model_real.py` exercises the real checkpoint: a real load, a
+real forecast on a 512-point sine series (`p10 <= mean <= p90` elementwise,
+exact `horizon` lengths), and a warm second call under 30s. Every test in
+it is marked `@pytest.mark.slow`; `pytest.ini` deselects `slow` by default
+(`addopts = -m "not slow"`), and the module also self-skips via
+`pytest.importorskip("timesfm3")` when that package isn't installed — so
+plain `python -m pytest tests/ -q` never needs it. Run the real-model
+suite explicitly once `timesfm[torch]` (see `docs/feasibility.md`) is
+installed:
+
+```
+python -m pytest tests/test_model_real.py -m slow -q
+```
 
 ## LICENSE NOTE
 

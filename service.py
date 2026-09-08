@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator, model_validator
 
 import settings
-from model import ENGINE, SeriesIn
+from model import ENGINE, CovariatesUnsupported, SeriesIn
 
 # ---------------------------------------------------------------------------
 # Request schema
@@ -183,6 +183,21 @@ async def _unauthorized_handler(request: Request, exc: Unauthorized) -> JSONResp
 @app.exception_handler(ModelLoading)
 async def _model_loading_handler(request: Request, exc: ModelLoading) -> JSONResponse:
     return JSONResponse(status_code=503, content={"error": "model loading"})
+
+
+@app.exception_handler(CovariatesUnsupported)
+async def _covariates_unsupported_handler(
+    request: Request, exc: CovariatesUnsupported
+) -> JSONResponse:
+    # Single-series covariates pass request validation (only multi-series +
+    # covariates is rejected there — see ForecastRequest._covariate_rules)
+    # but the real engine does not wire covariates into the model in v1
+    # (docs/feasibility.md). Raised by model.ForecastEngine.forecast();
+    # surfaced here as a 422 with the same bare {"error": ...} shape as the
+    # other engine/service-level errors above.
+    return JSONResponse(
+        status_code=422, content={"error": "covariates unsupported in v1"}
+    )
 
 
 def _sanitize_non_finite(obj):
