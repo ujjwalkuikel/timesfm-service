@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pytest
+httpx
+
+# NOTE: torch and timesfm are deliberately NOT listed here. This
+# requirements.txt is enough to run the service scaffold and its
+# contract tests (the engine is stubbed/mocked). The real inference
+# dependencies are documented separately in deploy.md (Task 4), pinned
+# to the exact spec recorded in docs/feasibility.md:
+#   pip install 'timesfm[torch]'
