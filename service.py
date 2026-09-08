@@ -4,12 +4,14 @@ Auth, request validation, and the response contract live here. Inference
 itself is entirely delegated to `ENGINE` (model.ForecastEngine) — this
 module never imports timesfm/torch, so contract tests run without them.
 
-Contract (spec: docs/superpowers/specs/2026-09-08-timesfm-forecast-service-design.md,
-Component 1, in the finsage repo — this repo never imports that repo, the
-contract is just transcribed here):
+Routes:
 
     POST /v1/forecast   (Bearer auth)
     GET  /v1/health     (open)
+
+The request/response contract implemented below is standalone and
+consumer-agnostic — any caller over HTTP can use it; this repo never
+imports or references a consumer's codebase.
 """
 from __future__ import annotations
 
@@ -79,28 +81,32 @@ class ForecastRequest(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _covariate_lengths_match_series(self) -> "ForecastRequest":
+    def _covariate_rules(self) -> "ForecastRequest":
         if self.covariates is None:
             return self
-        for s in self.series:
-            n = len(s.values)
-            if self.covariates.known_future:
-                expected = n + self.horizon
-                for name, arr in self.covariates.known_future.items():
-                    if len(arr) != expected:
-                        raise ValueError(
-                            f"covariates.known_future.{name} must have length "
-                            f"{expected} (len(values)+horizon) for series "
-                            f"{s.id!r}, got {len(arr)}"
-                        )
-            if self.covariates.past_only:
-                for name, arr in self.covariates.past_only.items():
-                    if len(arr) != n:
-                        raise ValueError(
-                            f"covariates.past_only.{name} must have length "
-                            f"{n} (len(values)) for series {s.id!r}, got "
-                            f"{len(arr)}"
-                        )
+        if len(self.series) > 1:
+            raise ValueError("covariates with multiple series unsupported in v1")
+
+        # Single series: the one covariates block unambiguously refers to it.
+        s = self.series[0]
+        n = len(s.values)
+        if self.covariates.known_future:
+            expected = n + self.horizon
+            for name, arr in self.covariates.known_future.items():
+                if len(arr) != expected:
+                    raise ValueError(
+                        f"covariates.known_future.{name} must have length "
+                        f"{expected} (len(values)+horizon) for series "
+                        f"{s.id!r}, got {len(arr)}"
+                    )
+        if self.covariates.past_only:
+            for name, arr in self.covariates.past_only.items():
+                if len(arr) != n:
+                    raise ValueError(
+                        f"covariates.past_only.{name} must have length "
+                        f"{n} (len(values)) for series {s.id!r}, got "
+                        f"{len(arr)}"
+                    )
         return self
 
 
@@ -112,7 +118,9 @@ class ForecastRequest(BaseModel):
 class SeriesResult(BaseModel):
     id: str
     mean: list[float]
-    quantiles: dict[str, list[float]]
+    # None when the request set quantiles=false; response_model_exclude_none
+    # on the route drops the key entirely in that case (mean-only response).
+    quantiles: dict[str, list[float]] | None = None
 
 
 class ForecastResponse(BaseModel):
@@ -220,6 +228,7 @@ async def health() -> dict:
     "/v1/forecast",
     dependencies=[Depends(require_api_key)],
     response_model=ForecastResponse,
+    response_model_exclude_none=True,
 )
 async def forecast(body: ForecastRequest) -> ForecastResponse:
     if not ENGINE.loaded():
@@ -233,7 +242,11 @@ async def forecast(body: ForecastRequest) -> ForecastResponse:
         model_version=ENGINE.model_version,
         generated_at=datetime.now(timezone.utc).isoformat(),
         results=[
-            SeriesResult(id=r.id, mean=list(r.mean), quantiles=dict(r.quantiles))
+            SeriesResult(
+                id=r.id,
+                mean=list(r.mean),
+                quantiles=dict(r.quantiles) if body.quantiles else None,
+            )
             for r in results
         ],
     )

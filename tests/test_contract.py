@@ -291,6 +291,48 @@ def test_forecast_422_past_only_covariate_wrong_length(
     assert resp.status_code == 422
 
 
+def test_forecast_422_covariates_with_multiple_series_unsupported(
+    client: TestClient, configured: str
+) -> None:
+    # Two series + any covariates -> explicit, documented 422 (v1 does not
+    # support covariates alongside a multi-series batch; see service.py).
+    payload = valid_payload(
+        series=[
+            {"id": "NVDA", "values": [1.0, 2.0, 3.0, 4.0, 5.0], "freq": "D"},
+            {"id": "AAPL", "values": [1.0, 2.0, 3.0, 4.0, 5.0], "freq": "D"},
+        ],
+        covariates={"past_only": {"volume_z": [0.1, 0.2, 0.3, 0.4, 0.5]}},
+    )
+    resp = client.post(
+        "/v1/forecast",
+        json=payload,
+        headers={"Authorization": f"Bearer {configured}"},
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert any(
+        "covariates with multiple series unsupported in v1" in e["msg"]
+        for e in detail
+    )
+
+
+def test_forecast_422_quoted_nan_string_value(
+    client: TestClient, configured: str
+) -> None:
+    # pydantic coerces the quoted string "NaN" to float('nan') under lax
+    # validation; pin that it still gets caught by the finite-values check
+    # rather than silently passing through as a non-finite value.
+    payload = valid_payload(
+        series=[{"id": "NVDA", "values": [1.0, "NaN", 3.0], "freq": "D"}]
+    )
+    resp = client.post(
+        "/v1/forecast",
+        json=payload,
+        headers={"Authorization": f"Bearer {configured}"},
+    )
+    assert resp.status_code == 422
+
+
 def test_forecast_covariates_correct_length_pass_validation(
     client: TestClient, configured: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -369,3 +411,39 @@ def test_forecast_happy_path_response_shape(
     assert fake.last_call["horizon"] == 4
     assert fake.last_call["series"][0].id == "NVDA"
     assert fake.last_call["series"][0].values == [1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def test_forecast_quantiles_false_omits_quantiles_key(
+    client: TestClient, configured: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeEngine(is_loaded=True)
+    monkeypatch.setattr(service, "ENGINE", fake)
+
+    payload = valid_payload(horizon=4, quantiles=False)
+    resp = client.post(
+        "/v1/forecast",
+        json=payload,
+        headers={"Authorization": f"Bearer {configured}"},
+    )
+    assert resp.status_code == 200
+    result = resp.json()["results"][0]
+    assert result.keys() == {"id", "mean"}
+    assert len(result["mean"]) == 4
+
+
+def test_forecast_quantiles_true_default_includes_quantiles_key(
+    client: TestClient, configured: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeEngine(is_loaded=True)
+    monkeypatch.setattr(service, "ENGINE", fake)
+
+    # quantiles omitted entirely -> defaults to true
+    payload = valid_payload(horizon=4)
+    resp = client.post(
+        "/v1/forecast",
+        json=payload,
+        headers={"Authorization": f"Bearer {configured}"},
+    )
+    assert resp.status_code == 200
+    result = resp.json()["results"][0]
+    assert result.keys() == {"id", "mean", "quantiles"}

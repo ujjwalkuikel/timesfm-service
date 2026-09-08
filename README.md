@@ -5,10 +5,11 @@ numeric daily series, get back a mean forecast plus P10–P90 quantiles. It
 knows nothing about any caller's domain — callers supply the series data,
 this service never fetches market data or anything else itself.
 
-This is Component 1 of a larger design (see the architecture doc referenced
-in `docs/plans/2026-09-08-timesfm-service.md`); the FinSage integration that
-consumes this service is a separate, later repo/plan. **This repo never
-imports or references that other codebase.**
+It is designed to be consumed by any caller over HTTP — see
+`docs/plans/2026-09-08-timesfm-service.md` for the design this repo
+implements. **This repo never imports or references any consumer's
+codebase**; any integration that calls this service lives in its own,
+separate repo/plan.
 
 ## Status
 
@@ -25,9 +26,11 @@ POST /v1/forecast   (Authorization: Bearer $FORECAST_API_KEY)
 GET  /v1/health     (open, no auth)
 ```
 
-See `docs/superpowers/specs/2026-09-08-timesfm-forecast-service-design.md`
-(Component 1) in the finsage repo for the full request/response contract —
-that document is authoritative; this repo just implements it.
+The full request/response contract (Component 1 of the design this repo
+implements) is authoritative elsewhere per
+`docs/plans/2026-09-08-timesfm-service.md`; this repo just implements it —
+see `service.py` for the concrete request/response shapes and validation
+rules.
 
 ## Run
 
