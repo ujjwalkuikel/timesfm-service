@@ -46,19 +46,20 @@ cp service.py settings.py model.py requirements.txt /home/ubuntu/timesfm-service
 
 ### 4. Create Environment File
 
-Generate a secure API key and create `.env`:
+Generate a secure API key and write it into `.env` with shell expansion
+(the earlier revision of this doc piped a *quoted* heredoc delimiter
+(`cat << 'EOF' > .env`) into `.env`, which suppresses `$()` expansion —
+`FORECAST_API_KEY=$(cat api_key.txt)` landed in the file **literally**,
+giving every deployment the same guessable bearer token, and the
+verification curl below still "passed" because it greps that same
+literal back out of `.env`. Use `printf` with an expanded variable
+instead, never a quoted heredoc, for any secret value):
 
 ```bash
 cd /home/ubuntu/timesfm-service
-python -c "import secrets; print(secrets.token_hex(32))" > api_key.txt
-cat << 'EOF' > .env
-FORECAST_API_KEY=$(cat api_key.txt)
-FORECAST_PORT=8090
-FORECAST_WARM_AT_BOOT=1
-# HF_TOKEN=  # Optional: set if you have a Hugging Face token to avoid rate limits
-EOF
+KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+printf 'FORECAST_API_KEY=%s\nFORECAST_PORT=8090\nFORECAST_WARM_AT_BOOT=1\n' "$KEY" > .env
 chmod 600 .env
-rm api_key.txt
 ```
 
 **Alternatively, manually create `.env`:**
@@ -113,10 +114,15 @@ sudo journalctl -u timesfm-forecast -n 50 -f
 
 ### 1. Health Check (No Auth)
 
-Poll the health endpoint until the model is loaded:
+uvicorn only binds the port after its lifespan startup hook finishes, and
+with `FORECAST_WARM_AT_BOOT=1` that hook blocks on the full checkpoint
+load — so for roughly the first 45–90 seconds after the unit starts, the
+port isn't listening at all and a plain `curl` will get connection
+refused, not a slow response. Poll with retry so the check waits through
+that window instead of failing immediately:
 
 ```bash
-curl http://127.0.0.1:8090/v1/health
+curl --retry 20 --retry-delay 5 --retry-connrefused http://127.0.0.1:8090/v1/health
 ```
 
 Example response while loading:
@@ -163,7 +169,7 @@ curl -X POST http://127.0.0.1:8090/v1/forecast \
 Expected response (should complete in 1–2 seconds):
 ```json
 {
-  "model_version": "google/timesfm-3.0-pytorch",
+  "model_version": "timesfm-3-330m",
   "generated_at": "2026-09-08T15:30:45.123456+00:00",
   "results": [
     {
@@ -197,12 +203,13 @@ sudo systemctl restart timesfm-forecast
 
 ### Update the Application
 
-To pull new code and restart:
+Step 3 above copies the tree rather than `git clone`s it, so there is no
+`.git` directory to pull into by default. Copy the new tree (or `git pull`
+if you cloned instead), then restart:
 
 ```bash
 cd /home/ubuntu/timesfm-service
-# Pull/sync new code
-git pull  # or manually copy updated files
+cp /path/to/updated/service.py settings.py model.py requirements.txt .  # or: git pull, if you cloned
 sudo systemctl restart timesfm-forecast
 ```
 
