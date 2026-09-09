@@ -8,6 +8,7 @@ installed.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from datetime import datetime
@@ -18,6 +19,7 @@ from fastapi.testclient import TestClient
 import service
 import settings
 from model import SeriesOut
+from service import ForecastRequest
 
 
 @pytest.fixture()
@@ -369,6 +371,63 @@ def test_forecast_503_when_engine_not_loaded(
     )
     assert resp.status_code == 503
     assert resp.json() == {"error": "model loading"}
+
+
+class FakeEngineTracksWarmup(FakeEngine):
+    """Like FakeEngine, but ensure_loaded() only records the call instead
+    of instantly marking itself loaded, so a test can assert scheduling
+    happened without the fake self-healing on the same tick."""
+
+    def __init__(self) -> None:
+        super().__init__(is_loaded=False)
+        self.ensure_loaded_calls = 0
+
+    async def ensure_loaded(self) -> None:
+        self.ensure_loaded_calls += 1
+
+
+def test_forecast_503_schedules_background_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding I1: with FORECAST_WARM_AT_BOOT unset (or false), nothing but
+    the lifespan hook ever calls ENGINE.ensure_loaded() — so a service that
+    started cold would 503 "model loading" forever. A forecast request that
+    finds the engine unloaded must still 503 immediately, but must also
+    schedule a background ensure_loaded() so the service self-heals."""
+    fake = FakeEngineTracksWarmup()
+    monkeypatch.setattr(service, "ENGINE", fake)
+    monkeypatch.setattr(service, "_warmup_task", None)
+
+    async def run() -> None:
+        with pytest.raises(service.ModelLoading):
+            await service.forecast(ForecastRequest(**valid_payload()))
+        # Give the scheduled task a chance to actually run before asserting.
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert fake.ensure_loaded_calls == 1
+    assert service._warmup_task is not None
+
+
+def test_forecast_503_does_not_spawn_duplicate_warmup_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two requests arriving while a load is already in flight must not
+    each spawn their own ensure_loaded() task — the module-level guard
+    should reuse the pending task instead."""
+    fake = FakeEngineTracksWarmup()
+    monkeypatch.setattr(service, "ENGINE", fake)
+    monkeypatch.setattr(service, "_warmup_task", None)
+
+    async def run() -> None:
+        with pytest.raises(service.ModelLoading):
+            await service.forecast(ForecastRequest(**valid_payload()))
+        with pytest.raises(service.ModelLoading):
+            await service.forecast(ForecastRequest(**valid_payload()))
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert fake.ensure_loaded_calls == 1
 
 
 # ---------------------------------------------------------------------------

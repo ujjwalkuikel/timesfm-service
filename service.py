@@ -15,6 +15,7 @@ imports or references a consumer's codebase.
 """
 from __future__ import annotations
 
+import asyncio
 import math
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -167,6 +168,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="timesfm-forecast-service", lifespan=lifespan)
 
+# Self-healing load: with FORECAST_WARM_AT_BOOT unset, nothing but the
+# lifespan hook above ever calls ENGINE.ensure_loaded(), so a service that
+# started cold would 503 "model loading" forever. When a forecast request
+# finds the engine unloaded, schedule a background load and still return the
+# 503 immediately below (self-healing without blocking the request).
+# ENGINE.ensure_loaded()'s own double-checked lock already makes duplicate
+# calls harmless, but a bare `asyncio.create_task(...)` with no reference
+# held is eligible for GC before it runs — this module-level ref plus the
+# `.done()` check avoids both the GC risk and spawning a pile of redundant
+# tasks while one load is already in flight.
+_warmup_task: asyncio.Task | None = None
+
+
+def _schedule_warmup() -> None:
+    global _warmup_task
+    if _warmup_task is None or _warmup_task.done():
+        _warmup_task = asyncio.create_task(ENGINE.ensure_loaded())
+
 
 @app.exception_handler(ServiceNotConfigured)
 async def _service_not_configured_handler(
@@ -247,6 +266,7 @@ async def health() -> dict:
 )
 async def forecast(body: ForecastRequest) -> ForecastResponse:
     if not ENGINE.loaded():
+        _schedule_warmup()
         raise ModelLoading()
 
     series_in = [SeriesIn(id=s.id, values=s.values, freq=s.freq) for s in body.series]
