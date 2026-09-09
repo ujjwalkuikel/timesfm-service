@@ -1,0 +1,15 @@
+[Unit]
+Description=TimesFM Forecast Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/timesfm-service
+EnvironmentFile=/home/ubuntu/timesfm-service/.env
+ExecStart=/home/ubuntu/timesfm-service/.venv/bin/uvicorn service:app --host 127.0.0.1 --port 8090
+Restart=on-failure
+RestartSec=5
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target
